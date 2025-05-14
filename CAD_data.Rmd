@@ -1,0 +1,197 @@
+---
+title: "InClass CAD Data"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(tidyverse)
+
+```
+
+```{r}
+#Initial loading of data
+CAD_data <- read.csv("Data/call_data_from_CAD.csv")
+
+```
+
+```{r}
+#Cleaning the data
+CAD_data[CAD_data == 'NULL'] = NA
+CAD_NARemoved <- na.omit(CAD_data) %>%distinct(IncidentNumber, .keep_all = TRUE) 
+
+CAD_filtered <- CAD_NARemoved %>% filter(CAD_NARemoved$Disposition != "DISREGARD", 
+                                         CAD_NARemoved$Disposition != "DISREGARDED BY DISPATCH")
+```
+
+```{r}
+#Separating observations based on who is first recieving the call (PrimaryUnitCallSign)
+recieving_calls_unique <- unique(CAD_filtered$PrimaryUnitCallSign)
+print(recieving_calls_unique)
+
+```
+
+```{r}
+
+#Create columns: CAHOOTS_Recieved, EPD_Recieved, CAHOOTS_RESPONDING, EPD_RESPONDING, WITHIN_Agency, CALL_Diverted
+
+CAD_filtered <- CAD_filtered %>% 
+  mutate(CAHOOTS_Received = case_when(
+    str_detect(PrimaryUnitCallSign, regex("CAHOOT", 
+                                          ignore_case = TRUE)) ~ TRUE,
+    toupper(substr(PrimaryUnitCallSign, 2, 2)) == "J" ~ TRUE,
+    TRUE ~ FALSE
+    )
+  )
+
+#Creating EPD_Recieved column
+CAD_filtered <- CAD_filtered %>%
+  mutate(EPD_Received = case_when(
+    str_detect(PrimaryUnitCallSign, regex("EP", 
+                                          ignore_case = TRUE)) ~ TRUE,
+      toupper(substr(PrimaryUnitCallSign, 2, 2)) == "E" ~ TRUE,
+    TRUE ~ FALSE
+    )
+  )
+
+CAD_filtered <- CAD_filtered %>% 
+  mutate(CAHOOTS_Responding = case_when(
+    str_detect(RespondingUnitCallSign, regex("CAHOOT", 
+                                          ignore_case = TRUE)) ~ TRUE,
+    toupper(substr(RespondingUnitCallSign, 2, 2)) == "J" ~ TRUE,
+    TRUE ~ FALSE
+    ) 
+  )
+
+CAD_filtered <- CAD_filtered %>%
+  mutate(EPD_Responding = case_when(
+    str_detect(RespondingUnitCallSign, regex("EP", 
+                                          ignore_case = TRUE)) ~ TRUE,
+      toupper(substr(RespondingUnitCallSign, 2, 2)) == "E" ~ TRUE,
+    TRUE ~ FALSE
+    )
+  )
+
+CAD_filtered <- CAD_filtered %>%
+  rename(
+    Within_Agency = IsPrimary
+  )
+
+CAD_filtered <- CAD_filtered %>%
+  mutate(
+    CALL_Diverted = !as.logical(Within_Agency)
+  )
+```
+
+```{r}
+# creating frequency tables and computing proportions
+
+#Calls by source/those receiving the call first
+recieving_props <- CAD_filtered %>%
+  summarize(
+    tot_calls = n(),
+    other = sum(!CAHOOTS_Received & !EPD_Recieved),
+    from_CAHOOTS = sum(CAHOOTS_Received),
+    from_EPD = sum(EPD_Received)
+  ) %>%
+  mutate(
+    prop_other = other / tot_calls,
+    prop_from_CAHOOTS = from_CAHOOTS / tot_calls,
+    prop_from_EPD = from_EPD / tot_calls
+  )
+
+#Calls diverted
+diverted_props <- CAD_filtered %>%
+  summarize(
+    tot_calls = n(),
+    tot_diverted = sum(CALL_Diverted),
+    
+    EPD_to_CAHOOTS = sum(EPD_Recieved & CAHOOTS_Responding),
+    CAHOOTS_to_EPD = sum(CAHOOTS_Recieved & EPD_Responding)
+  ) %>%
+  mutate(
+    prop_diverted = tot_diverted / tot_calls,
+    prop_EPD_to_CAHOOTS = EPD_to_CAHOOTS / tot_diverted,
+    prop_CAHOOTS_to_EPD = CAHOOTS_to_EPD / tot_diverted
+  )
+
+#Printing results
+cat("Call Sources: \n")
+recieving_props %>% 
+  select(starts_with("prop")) %>% #select columns based on name
+  pivot_longer(everything(), names_to = "Reciever",  values_to = "Proportion") %>% #pivoting to reshape data from wide to long format then converts column that starts with 'prop_from' into 2 columns Reciever and Proportion
+  mutate(Reciever = str_remove(Reciever, "prop_from") %>%
+           str_replace("_", " ") %>%
+         str_to_title(),
+         Proportion = scales::percent(Proportion, accuracy = 0.1)) %>% knitr::kable()
+
+cat("\n\nCall Diversions:\n")
+diverted_props %>%
+  select(starts_with("prop")) %>% #select columns based on name
+  pivot_longer(everything(), names_to = "Metric",  values_to = "Proportion") %>% #pivoting to reshape data from wide to long format then converts column that starts with 'prop' into 2 columns Metric and Proportion
+  mutate(Metric = case_when(
+    Metric == "prop_diverted" ~ "Total Diverted",
+    Metric == "prop_EPD_to_CAHOOTS" ~ "EPD to CAHOOTS",
+    Metric == "prop_CAHOOTS_to_EPD" ~ "CAHOOTS to EPD"
+  ),
+    Proportion = scales::percent(Proportion, accuracy = 0.1)) %>% knitr::kable()
+```
+
+```{r}
+#seeing types of incidents to be used as independent variable
+incidents_unique <- unique(CAD_filtered$InitialIncidentTypeDescription)
+print(incidents_unique)
+```
+```{r}
+#Calculating Agency Proportions based on Incident Type
+agency_proportion <- CAD_filtered %>%
+  group_by(InitialIncidentTypeDescription) %>%
+  summarize(
+    tot_calls = n(),
+    CAHOOTS_prop = sum(CAHOOTS_Recieved) / tot_calls,
+    EPD_prop = sum(EPD_Recieved) / tot_calls
+  ) %>%
+  arrange(desc(tot_calls))
+
+#Visualizing top 15 incident types
+agency_proportion %>%
+  slice_max(tot_calls, n = 15) %>%
+  pivot_longer(
+    cols = c(CAHOOTS_prop, EPD_prop),
+    names_to = "Agency",
+    values_to = "Proportion"
+  ) %>%
+  ggplot(aes(x = reorder(InitialIncidentTypeDescription, tot_calls),
+             y = Proportion, fill = Agency)) +
+  geom_col(position = 'dodge') +
+  labs(title = "Agency Response Proportion by Incident Type",
+       x = "Incident Type",
+       y = "Proportion of Calls") + 
+  coord_flip()
+```
+
+```{r}
+#Performing analysis of agency recieved or responding to see if there is independence or not. Using sample of 1000 observations
+CAD_chi_samp <- CAD_filtered %>% sample_n(1000)
+
+chi_vars <- c("CAHOOTS_Recieved", "EPD_Recieved", "CAHOOTS_Responding", "EPD_Responding")
+
+CAD_filtered_clean <- CAD_filtered %>% drop_na(all_of(chi_vars), CALL_Diverted)
+
+results = list()
+for (var in chi_vars) {
+  tbl <- table(CAD_chi_samp[[var]], CAD_chi_samp$CALL_Diverted)
+  test <- chisq.test(tbl)
+  results[[var]] <- list(
+    stat = test$statistic,
+    p.value = test$p.value,
+    expected = test$expected
+  )
+}
+
+print(results)
+```
+
