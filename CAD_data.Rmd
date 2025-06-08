@@ -9,7 +9,11 @@ Try executing this chunk by clicking the *Run* button within the chunk or by pla
 
 ```{r}
 library(tidyverse)
-
+install.packages("lubridate")
+library(lubridate)
+library(ggplot2)
+install.packages("nnet")
+library(nnet)
 ```
 
 ```{r}
@@ -25,13 +29,9 @@ CAD_NARemoved <- na.omit(CAD_data) %>%distinct(IncidentNumber, .keep_all = TRUE)
 
 CAD_filtered <- CAD_NARemoved %>% filter(CAD_NARemoved$Disposition != "DISREGARD", 
                                          CAD_NARemoved$Disposition != "DISREGARDED BY DISPATCH")
-```
 
-```{r}
-#Separating observations based on who is first recieving the call (PrimaryUnitCallSign)
-recieving_calls_unique <- unique(CAD_filtered$PrimaryUnitCallSign)
-print(recieving_calls_unique)
-
+CAD_filtered$Call_Created_Time <- as.POSIXct(CAD_filtered$Call_Created_Time,
+                                             format = "%m/%d/%y %H:%M")
 ```
 
 ```{r}
@@ -40,12 +40,10 @@ print(recieving_calls_unique)
 
 CAD_filtered <- CAD_filtered %>% 
   mutate(CAHOOTS_Received = case_when(
-    str_detect(PrimaryUnitCallSign, regex("CAHOOT", 
+    str_detect(PrimaryUnitCallSign, regex("^(1J77|3J79|3J78|3J77|4J79|3J81|3J76|2J28|2J29|CAHOOT|CAHOT|CAHO)\\s*$", 
                                           ignore_case = TRUE)) ~ TRUE,
-    toupper(substr(PrimaryUnitCallSign, 2, 2)) == "J" ~ TRUE,
     TRUE ~ FALSE
-    )
-  )
+  ))
 
 #Creating EPD_Recieved column
 CAD_filtered <- CAD_filtered %>%
@@ -59,9 +57,9 @@ CAD_filtered <- CAD_filtered %>%
 
 CAD_filtered <- CAD_filtered %>% 
   mutate(CAHOOTS_Responding = case_when(
-    str_detect(RespondingUnitCallSign, regex("CAHOOT", 
+    str_detect(RespondingUnitCallSign, 
+regex("^(1J77|3J79|3J78|3J77|4J79|3J81|3J76|2J28|2J29|CAHOOT|CAHOT|CAHO)\\s*$", 
                                           ignore_case = TRUE)) ~ TRUE,
-    toupper(substr(RespondingUnitCallSign, 2, 2)) == "J" ~ TRUE,
     TRUE ~ FALSE
     ) 
   )
@@ -87,13 +85,11 @@ CAD_filtered <- CAD_filtered %>%
 ```
 
 ```{r}
-# creating frequency tables and computing proportions
-
 #Calls by source/those receiving the call first
 recieving_props <- CAD_filtered %>%
   summarize(
     tot_calls = n(),
-    other = sum(!CAHOOTS_Received & !EPD_Recieved),
+    other = sum(!CAHOOTS_Received & !EPD_Received),
     from_CAHOOTS = sum(CAHOOTS_Received),
     from_EPD = sum(EPD_Received)
   ) %>%
@@ -109,50 +105,99 @@ diverted_props <- CAD_filtered %>%
     tot_calls = n(),
     tot_diverted = sum(CALL_Diverted),
     
-    EPD_to_CAHOOTS = sum(EPD_Recieved & CAHOOTS_Responding),
-    CAHOOTS_to_EPD = sum(CAHOOTS_Recieved & EPD_Responding)
+    EPD_to_CAHOOTS = sum(EPD_Received & CAHOOTS_Responding),
+    CAHOOTS_to_EPD = sum(CAHOOTS_Received & EPD_Responding)
   ) %>%
   mutate(
     prop_diverted = tot_diverted / tot_calls,
     prop_EPD_to_CAHOOTS = EPD_to_CAHOOTS / tot_diverted,
     prop_CAHOOTS_to_EPD = CAHOOTS_to_EPD / tot_diverted
   )
-
-#Printing results
-cat("Call Sources: \n")
-recieving_props %>% 
-  select(starts_with("prop")) %>% #select columns based on name
-  pivot_longer(everything(), names_to = "Reciever",  values_to = "Proportion") %>% #pivoting to reshape data from wide to long format then converts column that starts with 'prop_from' into 2 columns Reciever and Proportion
-  mutate(Reciever = str_remove(Reciever, "prop_from") %>%
-           str_replace("_", " ") %>%
-         str_to_title(),
-         Proportion = scales::percent(Proportion, accuracy = 0.1)) %>% knitr::kable()
-
-cat("\n\nCall Diversions:\n")
-diverted_props %>%
-  select(starts_with("prop")) %>% #select columns based on name
-  pivot_longer(everything(), names_to = "Metric",  values_to = "Proportion") %>% #pivoting to reshape data from wide to long format then converts column that starts with 'prop' into 2 columns Metric and Proportion
-  mutate(Metric = case_when(
-    Metric == "prop_diverted" ~ "Total Diverted",
-    Metric == "prop_EPD_to_CAHOOTS" ~ "EPD to CAHOOTS",
-    Metric == "prop_CAHOOTS_to_EPD" ~ "CAHOOTS to EPD"
-  ),
-    Proportion = scales::percent(Proportion, accuracy = 0.1)) %>% knitr::kable()
 ```
+
+
+```{r}
+# Visualizing Call Sources
+recieving_props %>% 
+  select(starts_with("prop")) %>% 
+  pivot_longer(everything(), names_to = "Receiver", values_to = "Proportion") %>% 
+  mutate(Receiver = str_remove(Receiver, "prop_|prop_from_") %>%
+           str_replace_all("_", " ") %>%
+           str_to_title()) %>%
+  ggplot(aes(x = Receiver, y = Proportion, fill = Receiver)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(Proportion, accuracy = 0.1)), 
+            vjust = -0.3, size = 3.5) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(title = "Call Distribution by Receiving Agency", 
+       x = "Agency", y = "Proportion of Total Calls") +
+  theme_minimal()
+```
+
+```{r}
+#Diverted vs. non diverted calls
+diverted_props %>%
+  mutate(Not_Diverted = 1 - prop_diverted) %>%  # Calculate non-diverted proportion
+  pivot_longer(cols = c(prop_diverted, Not_Diverted),
+             names_to = "Status", values_to = "Proportion") %>%
+  mutate(Status = factor(Status, 
+                       levels = c("prop_diverted", "Not_Diverted"),
+                       labels = c("Diverted", "Not Diverted"))) %>%
+  ggplot(aes(x = "", y = Proportion, fill = Status)) +
+  geom_col(width = 1, color = "white") +
+  geom_text(aes(label = scales::percent(Proportion, accuracy = 0.1)),
+            position = position_stack(vjust = 0.5), 
+            size = 4, color = "white") +
+  coord_polar(theta = "y") +  # Remove this line for a stacked bar instead of pie
+  scale_fill_manual(values = c("#E69F00", "#56B4E9")) +
+  labs(title = "Call Diversion Status", 
+       subtitle = "Percentage of Total Calls",
+       fill = "Status") +
+  theme_void() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+```{r}
+# Filter just EPD-received calls (regardless of whether they were diverted)
+EPD_calls <- CAD_filtered %>%
+  filter(EPD_Received == TRUE) %>%
+  mutate(year = year(as.Date(Call_Created_Time)))
+
+# Then calculate how many were diverted to CAHOOTS each year
+diverted_over_time <- EPD_calls %>%
+  group_by(year) %>%
+  summarize(
+    total = n(),
+    diverted = sum(CALL_Diverted, na.rm = TRUE),
+    diversion_rate = mean(CALL_Diverted, na.rm = TRUE)
+  ) 
+
+# Plot the proportion (rate)
+ggplot(diverted_over_time, aes(x = year, y = diversion_rate)) +
+  geom_line() +
+  labs(title = 'Proportion of Diverted Calls From EPD to CAHOOTS',
+       x = 'Year',
+       y = 'Diversion Rate') +
+  theme_minimal()
+```
+
 
 ```{r}
 #seeing types of incidents to be used as independent variable
 incidents_unique <- unique(CAD_filtered$InitialIncidentTypeDescription)
-print(incidents_unique)
+#print(incidents_unique)
 ```
+
 ```{r}
 #Calculating Agency Proportions based on Incident Type
 agency_proportion <- CAD_filtered %>%
   group_by(InitialIncidentTypeDescription) %>%
   summarize(
     tot_calls = n(),
-    CAHOOTS_prop = sum(CAHOOTS_Recieved) / tot_calls,
-    EPD_prop = sum(EPD_Recieved) / tot_calls
+    CAHOOTS_prop = sum(CAHOOTS_Responding) / tot_calls,
+    EPD_prop = sum(EPD_Responding) / tot_calls
   ) %>%
   arrange(desc(tot_calls))
 
@@ -174,24 +219,259 @@ agency_proportion %>%
 ```
 
 ```{r}
-#Performing analysis of agency recieved or responding to see if there is independence or not. Using sample of 1000 observations
-CAD_chi_samp <- CAD_filtered %>% sample_n(1000)
+agency_proportion %>%
+  mutate(CAHOOTS_count = CAHOOTS_prop * tot_calls,
+         EPD_count = EPD_prop * tot_calls) %>%
+  select(InitialIncidentTypeDescription, CAHOOTS_count, EPD_count) %>%
+  pivot_longer(cols = -InitialIncidentTypeDescription, 
+               names_to = "Agency", 
+               values_to = "Count") %>%
+  mutate(Agency = str_remove(Agency, "_count")) %>% 
+  group_by(Agency) %>%
+  slice_max(order_by = Count, n = 10) %>%
+  ungroup() %>%
+  # Create new label combining agency and incident
+  mutate(label = paste(Agency, InitialIncidentTypeDescription, sep = ": ")) %>%
+  ggplot(aes(x = reorder(label, Count), y = Count, fill = Agency)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ Agency, scales = "free_y") +
+  scale_fill_manual(values = c("CAHOOTS" = "#1b9e77", "EPD" = "#d95f02")) +
+  labs(title = "Top 10 Incident Types by Response Agency",
+       x = "Incident Type",
+       y = "Number of Calls",
+       caption = "Data shows approximate counts based on agency proportions") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 12, face = "bold"),
+        axis.text.y = element_text(size = 9))
+```
 
-chi_vars <- c("CAHOOTS_Recieved", "EPD_Recieved", "CAHOOTS_Responding", "EPD_Responding")
+
+```{r}
+#Performing analysis of agency received or responding to see if there is independence or not. Using sample of 1000 observations
+#Null hypothesis: testing whether CAHOOTS Receiving/Responding or EPD Receiving/Responding are independent of each other
+
+chi_vars <- c("CAHOOTS_Received", "EPD_Received", "CAHOOTS_Responding", "EPD_Responding")
 
 CAD_filtered_clean <- CAD_filtered %>% drop_na(all_of(chi_vars), CALL_Diverted)
 
+#Sample of of 2000 rows
+CAD_chi_samp <- CAD_filtered %>% sample_n(2000)
+
 results = list()
 for (var in chi_vars) {
+  #Creating contingency table (counts observations of every unique combination of values) between variable and CALL_Diverted
   tbl <- table(CAD_chi_samp[[var]], CAD_chi_samp$CALL_Diverted)
   test <- chisq.test(tbl)
+  expected <- test$expected
+  
   results[[var]] <- list(
-    stat = test$statistic,
-    p.value = test$p.value,
-    expected = test$expected
+    observed = tbl,   #actual counts 
+    stat = test$statistic,   #Chi-square test statistic
+    p.value = test$p.value,   #Significance level
+    expected = expected   #Expected counts under independence
   )
 }
-
 print(results)
+#low p value indicates rejection of null hypothesis
+#CAHOOTS_Received has really low p-val therefore we can reject null hypothesis
+#Was CAHOOTS assigned to the call vs. call being diverted? The calls that CAHOOTS receives are most likely already diverted
+
+#EPD_Received also has a really low p-value and we can reject null hypothesis
+#All have really low p-value meaning that call diversion is not random and is connected to which agency received or responded to the call
 ```
 
+```{r}
+#attempting multinomial logistic regression using Agency_Responding as categorical outcome variable
+
+violentCrimes <- c('ASSAULT', 'ASSAULT WITH INJURY', 'ASSAULT PUBLIC SAFETY OFFICER', 'FIGHT', 'ARMED SUBJECT', 'ARMED DISPUTE', 'MENACING', 'ROBBERY', 'KIDNAP', 'WEAPON OFFENSE', 'RIOT', 'STAB WOUND', 'GUNSHOT WOUND')
+
+trafficViolation <- c('TRAFFIC STOP', 'RECKLESS DRIVING', 'CARELESS DRIVING', 'DUII', 'HIT AND RUN', 'WRONG WAY DRIVER', 'SPEEDING VEHICLE', 'SPEEDING MOTORCYCLE', 'ILLEGAL', 'MOTORCYCLE', 'TRAFFIC COMPLAINT', 'OPEN CONTAINER')
+
+theftProperty <- c('THEFT', 'BURGLARY', 'CRIMINAL TRESPASS', 'CRIMINAL MISCHIEF', 'THEFT FROM VEHICLE', 'THEFT OF BICYCLE', 'THEFT OF GUN', 'THEFT OF SERVICES', 'THEFT OF IDENTITY', 'THEFT OF MAIL', 'THEFT OF LICENSE PLATE', 'UNLAWFUL VEHICLE ENTRY', 'PURSE SNATCH', 'SHOPLIFT', 'SHOPLIFT 3050 PROGRAM', 'UNAUTHORIZED USE OF VEHICLE', 'RECOVERED STOLEN VEHICLE', 'RECOVERED STOLEN PROPERTY')
+
+medicalEmergencies <- c('OVERDOSE', 'CARDIAC ARREST', 'RESPIRATORY ARREST', 'SUBJECT DOWN', 'INJURED SUBJECT', 'POISONING', 'DROWNING', 'WATER RESCUE')
+
+mentalHealth <- c('SUICIDAL SUBJECT', 'SUICIDE', 'MENTAL SUBJECT', 'MENTAL TRANSPORT', 'DISORIENTED SUBJECT')
+
+animalIssues <- c('ANIMAL COMPLAINT', 'DOG BITE', 'ANIMAL CRUELTY', 'ANIMAL ABUSE', 'LIVESTOCK AT LARGE', 'DOG AT LARGE', 'DOG VICIOUS', 'FOUND ANIMAL', 'ABANDONED ANIMAL', 'DEAD ANIMAL')
+
+drugs <- c('IN POSSESSION OF NARCOTICS', 'NARCOTICS INVESTIGATION', 'CONTROLLED SUBSTANCE VIOLATION', 'DRUG K9', 'REQUEST DRE', 'SEIZED CONTRABAND')
+
+publicDisturbance <- c('LOUD NOISE', 'LOUD PARTY', 'DISORDERLY SUBJECT', 'DISORDERLY CONDUCT', 'DISORDERLY PARTY', 'DISORDERLY JUVENILES', 'INDECENT EXPOSURE', 'PUBLIC INDECENCY', 'NUDE SUBJECT')
+
+vehicleAccident <- c('MOTOR VEH UNKNOWN INJ', 'MOTOR VEH ACC NO INJURY', 'MOTOR VEH ACC INJURY', 'MOTOR VEH ACC FATALITY', 'VEHICLE/PEDESTRIAN CRASH', 'TRAIN VS PED/BIKE CRASH', 'ACCIDENT BIKE', 'ACCIDENT VEHICLE BIKE', 'TRAIN VS VEHICLE CRASH')
+
+suspicActivity <- c('SUSPICIOUS SUBJECT', 'SUSPICIOUS VEHCILE', 'SUSPICIOUS CONDITIONS', 'PROWLER', 'SUSPICIOUS DEVICE', 'SUSPICIOUS SUBSTANCE')
+
+alarms <- c('ALARM', 'AUDIBLE ALARM','ALARM PANIC', 'ALARM SILENT', 'ALARM HOLD UP', 'ALARM DURESS')
+
+warrantsArrests <- c('WARRANT SERVICE', 'ARREST', 'SEARCH WARRANT', 'WALKWAY', 'ESCAPE')
+
+assistanceRequest <- c('ASSIST PUBLIC- POLICE', 'ASSIST FIRE DEPARTMENT', 'ASSIST SHERIFFS OFFICE', 'ASSIST OUTSIDE AGENCY', 'REQUEST ASSISTANCE', 'CIVIL STANDBY')
+
+misc <- c('CHECK WELFARE', 'FOLLOW UP', 'INCOMPLETE CALL', 'PATROL CHECK', 'CITIZEN CONTACT', 'FOUND PROPERTY', 'LOST PROPERTY', 'GRAFFITI', 'LITTERING OFFENSIVE', 'TRASH BIN FIRE', 'SODOMY')
+```
+
+```{r}
+#Creating new column based on InitialIncidentType
+
+CAD_filtered <- CAD_filtered %>%
+  mutate(
+    Broad_Incidents = case_when(
+      InitialIncidentTypeDescription %in% violentCrimes ~ "Violent Crimes",
+      InitialIncidentTypeDescription %in% trafficViolation ~ "Traffic Violations",
+      InitialIncidentTypeDescription %in% theftProperty ~ "Theft & Property Crimes",
+      InitialIncidentTypeDescription %in% medicalEmergencies ~ "Medical Emergencies",
+      InitialIncidentTypeDescription %in% mentalHealth ~ "Mental Health Crises",
+      InitialIncidentTypeDescription %in% animalIssues ~ "Animal Related Crimes",
+      InitialIncidentTypeDescription %in% drugs ~ "Drug-Related",
+      InitialIncidentTypeDescription %in% publicDisturbance ~ "Public Disturbance",
+      InitialIncidentTypeDescription %in% vehicleAccident ~ "Vehicle Accident",
+      InitialIncidentTypeDescription %in% suspicActivity ~ "Suspicious Activity",
+      InitialIncidentTypeDescription %in% alarms ~ "Alarms",
+      InitialIncidentTypeDescription %in% warrantsArrests ~ "Warrants & Arrests",
+      InitialIncidentTypeDescription %in% assistanceRequest ~ "Assistance Requests",
+      InitialIncidentTypeDescription %in% misc ~ "Miscellaneous",
+    )
+  )
+
+CAD_filtered_Accidents <- CAD_filtered %>% drop_na(Broad_Incidents)
+```
+
+```{r}
+#Create single categorical response variable
+
+#will combine 2 boolean columns into categorical variable with 4 levels
+CAD_filtered_Accidents <- CAD_filtered_Accidents %>%
+  mutate(
+    Agency_Responding = case_when(
+      CAHOOTS_Responding & !EPD_Responding ~ "CAHOOTS",
+      EPD_Responding & !CAHOOTS_Responding ~ "EPD",
+      CAHOOTS_Responding & EPD_Responding ~ "BOTH",
+      TRUE ~ "Other"
+    ),
+    Agency_Responding = factor(Agency_Responding)
+  )
+
+#Extract Accident type and hour from time the call was created 
+CAD_filtered_Accidents <- CAD_filtered_Accidents %>% 
+  mutate( 
+    Hour = lubridate::hour(Call_Created_Time), 
+    TimeOfDay = case_when( 
+      Hour >= 6 & Hour < 12 ~ "Morning", 
+      Hour >= 12 & Hour < 18 ~ "Afternoon", 
+      Hour >= 18 | Hour < 6 ~ "Night" 
+    ), 
+    TimeOfDay = factor(TimeOfDay, levels = c("Morning", "Afternoon", "Night")) 
+  )
+
+CAD_filtered_Accidents <- CAD_filtered_Accidents %>%
+  mutate(
+    Year = lubridate::year(Call_Created_Time),
+    #Year = as.factor(Year)  # Make sure it's treated as categorical
+  )
+
+CAD_filtered_Accidents$Broad_Incidents <- as.factor(CAD_filtered_Accidents$Broad_Incidents)
+
+
+CAD_filtered_Accidents %>%
+  count(Year, Agency_Responding) %>%
+  group_by(Year) %>%
+  mutate(Proportion = n / sum(n)) %>%
+  ggplot(aes(x = Year, y = Proportion, fill = Agency_Responding)) +
+  geom_col(position = "fill") +
+  labs(title = "Proportion of Agency Responses by Year",
+       y = "Proportion",
+       x = "Year") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+
+```{r}
+model_data <- CAD_filtered_Accidents %>% 
+  select(Agency_Responding, Broad_Incidents, TimeOfDay, Year) %>% na.omit()  # Remove rows with missing values
+# Fit the model where Agency_Responding is the categorical outcome 
+#multinomial because using categorical variables with 4 different outcomes
+#predictors = Broad_Incidents and TimeofDay
+mlr_model <- multinom( 
+  Agency_Responding ~ Broad_Incidents + TimeOfDay + Year, 
+  data = model_data 
+) 
+
+levels(model_data$Agency_Responding)
+#Reference level: Refers to one of the categories in outcome variable baseline against which other categories are compared which is CAHOOTS
+
+# Summarize results 
+summary(mlr_model) 
+#shows coefficients and standard errors for each non-reference level of Agency_Responding
+#All coefficient estimates in output are log-odds comparisons relative to CAHOOTS
+#Each row in output for "EPD" and "Other gives log-odds of EPD responding instead of CAHOOTS given a specific Broad_Incident type and TimeOfDay"
+
+```
+
+
+```{r}
+# Get odds ratios and p-values 
+#odds ratio shows how much more or less likely EPD or OTHER agencies would respond to the incident type
+#Example: EPD is 1.004906 times more likely than CAHOOTS to respond to Warrant and arrest incidents
+#Example: TimeofDayAfternoon Other agencies 32% (0.678403) less likely than CAHOOTS to respond during the afternoon compared to reference time of day which is morning. 
+odds_ratios <- exp(coef(mlr_model)) 
+print(odds_ratios)
+#“The heatmap is based on the results of a multinomial logistic regression model. After calculating odds ratios — which show how much more or less likely an agency is to respond to certain types of calls — I used the model to predict actual probabilities. These probabilities are what you see here in the heatmap. So while the map doesn’t display odds ratios directly, it’s built from the same underlying model that produced them.”
+
+#making heatmap of predicted probabilities by incident type and agency
+model_data$Broad_Incidents <- factor(model_data$Broad_Incidents)
+model_data$TimeOfDay <- factor(model_data$TimeOfDay, levels = c("Morning", "Afternoon", "Night"))
+
+#creating new data for prediction: one row per incident type with fixed TimeOfDay (Night)
+predict_data <- expand.grid(
+  Broad_Incidents = levels(model_data$Broad_Incidents),
+  TimeOfDay = levels(model_data$TimeOfDay),
+  Year = unique(model_data$Year))
+
+predicted_probs <- predict(mlr_model, newdata = predict_data, type = "probs")
+prob_df <- cbind(predict_data, predicted_probs)
+
+#done for easier plotting does not change any data
+prob_long <- prob_df %>%
+  pivot_longer(cols = c("CAHOOTS", "EPD", "Other"), 
+               names_to = "Agency", values_to = "Probability")
+
+ggplot(prob_long, aes(x = Broad_Incidents, y = Agency, fill = Probability)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "darkred") +
+  labs(title = "Predicted Probability by Broad Incident Type and Time of Day",
+       x = "Broad Incident Type", y = "Agency Responding") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ TimeOfDay, ncol = 1)
+```
+
+
+```{r}
+# Calculate p-values 
+#uses z-test for each coefficient. z-value represents test statistic for coefficient estimate, indicating how many standard errors the estimate is from 0
+#used to determine if predictor variable has statistically significant effect on outcome relative to specified reference category
+#larger absolute z-val: suggests stronger effect of predictor on outcome
+z <- summary(mlr_model)$coefficients / summary(mlr_model)$standard.errors 
+#calculates 2 tailed p-val using normal distribution which tells whether predictor is statistically significant in determining likelihood of each Agency
+#gives probability fo observing extreme coefficient if the null hypothesis was true
+p <- (1 - pnorm(abs(z))) * 2 
+print(p) 
+#Null hypothesis: The log-odds of the agency being EPD or Other, compared to CAHOOTS, do not differ based on the predictor
+#Alternative Hypothesis: log-odds of agency being EPD or Other, comparted to CAHOOTS does differ based on predictor
+#To reject Null hypothesis p-val must be less than 0.05
+```
+
+Predictors that significantly affect which agency responds compared to CAHOOTS 
+REJECT NULL HYPOTHESIS
+-animal related crimes, assistance request, drug related,medical emergencies, mental health crises, time of day night, public disturbance, suspicious activity, theft and property crimes, vehicle accident, violent crimes, time of day afternoon
+
+Predictors that do not significantly affect agency response odds compared to CAHOOTS
+-traffic violations
+warrants and arrests
+
+Most predictors are statistically significant which means that incident type and time of day influence whether EPD or Other agencies respond versus CAHOOTS
